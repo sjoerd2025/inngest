@@ -111,10 +111,11 @@ func (w wrapper) GetSpansByRunID(ctx context.Context, runID ulid.ULID) (*cqrs.Ot
 }
 
 // GetSpansByRunIDsAndName returns spans by name with their current attribute
-// values, merging in any updates applied later via UpdateSpan. The self-join
-// on dynamic_span_id picks up follow-up rows (e.g. status flips, post-emit
+// values, merging in any updates applied later via UpdateSpan. The join on
+// dynamic_span_id picks up follow-up rows (e.g. status flips, post-emit
 // attribute stamps) that don't carry the span name and would otherwise be
-// filtered out.
+// filtered out. Each span is returned once regardless of how many rows in its
+// dynamic span group carry the name.
 func (w wrapper) GetSpansByRunIDsAndName(
 	ctx context.Context,
 	runIDs []ulid.ULID,

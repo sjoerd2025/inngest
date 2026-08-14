@@ -63,9 +63,14 @@ type Querier interface {
 	GetSpansByDebugSessionID(ctx context.Context, debugSessionID sql.NullString) ([]*GetSpansByDebugSessionIDRow, error)
 	GetSpansByRunID(ctx context.Context, runID string) ([]*GetSpansByRunIDRow, error)
 	// Returns spans by name with their current attribute values, merging in any
-	// updates applied later via UpdateSpan. The self-join on dynamic_span_id picks
-	// up follow-up rows (e.g. status flips, post-emit attribute stamps) that don't
-	// carry the span name and would otherwise be filtered out.
+	// updates applied later via UpdateSpan. The join on dynamic_span_id picks up
+	// follow-up rows (e.g. status flips, post-emit attribute stamps) that don't
+	// carry the span name and would otherwise be filtered out. The DISTINCT is
+	// load-bearing: for names carried by every row in a dynamic span group (e.g.
+	// "metadata"), joining the raw table fans k rows out to k^2 fragments. Unlike
+	// the postgres copy this has no outer s.run_id predicate: sqlc expands only
+	// the first /*SLICE:*/ marker, so referencing run_ids twice would generate
+	// more placeholders than bound parameters.
 	GetSpansByRunIDsAndName(ctx context.Context, arg GetSpansByRunIDsAndNameParams) ([]*GetSpansByRunIDsAndNameRow, error)
 	GetStepSpanByStepID(ctx context.Context, arg GetStepSpanByStepIDParams) (*GetStepSpanByStepIDRow, error)
 	GetTraceRun(ctx context.Context, runID ulid.ULID) (*TraceRun, error)

@@ -1667,9 +1667,13 @@ SELECT
     'input_span_id', CASE WHEN s.input IS NOT NULL THEN s.span_id ELSE NULL END
   ) ORDER BY s.start_time ASC, s.end_time ASC, s.span_id ASC) AS span_fragments
 FROM spans AS s
-JOIN spans AS m ON m.dynamic_span_id = s.dynamic_span_id AND m.run_id = s.run_id
-WHERE m.name = $1
-  AND m.run_id IN (SELECT UNNEST($2::TEXT[]))
+JOIN (
+  SELECT DISTINCT n.run_id, n.dynamic_span_id
+  FROM spans AS n
+  WHERE n.name = $1
+    AND n.run_id IN (SELECT UNNEST($2::TEXT[]))
+) AS m ON m.dynamic_span_id = s.dynamic_span_id AND m.run_id = s.run_id
+WHERE s.run_id IN (SELECT UNNEST($2::TEXT[]))
 GROUP BY s.run_id, s.trace_id, s.dynamic_span_id, s.parent_span_id
 ORDER BY s.run_id, span_start_time
 `
@@ -1690,9 +1694,19 @@ type GetSpansByRunIDsAndNameRow struct {
 }
 
 // Returns spans by name with their current attribute values, merging in any
-// updates applied later via UpdateSpan. The self-join on dynamic_span_id picks
-// up follow-up rows (e.g. status flips, post-emit attribute stamps) that don't
-// carry the span name and would otherwise be filtered out.
+// updates applied later via UpdateSpan. The join on dynamic_span_id picks up
+// follow-up rows (e.g. status flips, post-emit attribute stamps) that don't
+// carry the span name and would otherwise be filtered out. The DISTINCT is
+// load-bearing: for names carried by every row in a dynamic span group (e.g.
+// "metadata"), joining the raw table fans k rows out to k^2 fragments.
+//
+// run_ids must stay `IN (SELECT UNNEST(...))` rather than `= ANY(...)`. The
+// driver prepares statements server-side, so PostgreSQL switches to a generic
+// plan; with `= ANY` that plan merge-joins on run_id alone and demotes
+// dynamic_span_id to a join filter, cross-producting within each run. UNNEST
+// yields a relation the planner drives a nested loop from, keeping both
+// columns on idx_spans_run_id_dynamic_start_time. The redundant outer
+// predicate on s.run_id is what lets it start from that index.
 func (q *Queries) GetSpansByRunIDsAndName(ctx context.Context, arg GetSpansByRunIDsAndNameParams) ([]*GetSpansByRunIDsAndNameRow, error) {
 	rows, err := q.db.QueryContext(ctx, getSpansByRunIDsAndName, arg.Name, pq.Array(arg.RunIds))
 	if err != nil {

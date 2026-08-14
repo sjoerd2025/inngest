@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -3652,4 +3653,53 @@ func TestCQRSGetSpansByRunIDsAndNameNoCrossRunBleed(t *testing.T) {
 	groupA := spansByRun[runA]
 	require.Len(t, groupA, 1, "run A's single dynamic_span_id should collapse into one merged span")
 	assert.Equal(t, enums.StepStatusCompleted, groupA[0].Status, "the EXTEND follow-up's status must be merged onto the named row")
+}
+
+// Metadata spans share a dynamic_span_id per (parent, kind), so every row in
+// the group carries name='metadata'. Joining the raw table on that name would
+// return each row once per named sibling, and rollup applies add-op fragments
+// per occurrence — so k emissions would sum to k^2 instead of k.
+func TestCQRSGetSpansByRunIDsAndNameNoFragmentFanout(t *testing.T) {
+	cm, cleanup := initCQRS(t)
+	defer cleanup()
+
+	runID := ulid.MustNew(ulid.Now(), rand.Reader)
+	traceID := ulid.MustNew(ulid.Now(), rand.Reader).String()
+	const dynamicSpanID = "md-shared"
+	addAttrs := func(tokens int) []byte {
+		return fmt.Appendf(nil,
+			`{"_inngest.metadata.kind":"userland.usage","_inngest.metadata.scope":"run","_inngest.metadata.op":"add","_inngest.metadata.values":%s}`,
+			strconv.Quote(fmt.Sprintf(`{"tokens":%d}`, tokens)),
+		)
+	}
+
+	// Two emissions of the same kind under the same parent, as
+	// CreateMetadataSpanFromValues produces them.
+	insertTestSpan(t, cm, testSpanFields{
+		RunID:         runID.String(),
+		TraceID:       traceID,
+		DynamicSpanID: dynamicSpanID,
+		Name:          meta.SpanNameMetadata,
+		StartTime:     time.Now(),
+		Attributes:    addAttrs(3),
+	})
+	insertTestSpan(t, cm, testSpanFields{
+		RunID:         runID.String(),
+		TraceID:       traceID,
+		DynamicSpanID: dynamicSpanID,
+		Name:          meta.SpanNameMetadata,
+		StartTime:     time.Now().Add(time.Millisecond),
+		Attributes:    addAttrs(4),
+	})
+
+	spansByRun, err := cm.(wrapper).GetSpansByRunIDsAndName(t.Context(), []ulid.ULID{runID}, meta.SpanNameMetadata)
+	require.NoError(t, err)
+
+	group := spansByRun[runID]
+	require.Len(t, group, 1, "both emissions share one dynamic_span_id")
+	require.Len(t, group[0].Metadata, 1)
+
+	tokens, ok := group[0].Metadata[0].Values["tokens"]
+	require.True(t, ok, "tokens value should survive rollup")
+	assert.JSONEq(t, "7", string(tokens), "each fragment must be applied exactly once")
 }
