@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,8 +14,10 @@ import (
 	"github.com/inngest/inngest/pkg/coreapi/graph/models"
 	"github.com/inngest/inngest/pkg/cqrs"
 	"github.com/inngest/inngest/pkg/enums"
+	"github.com/inngest/inngest/pkg/logger"
 	"github.com/inngest/inngest/pkg/run"
 	"github.com/inngest/inngest/pkg/tracing/meta"
+	"github.com/inngest/inngest/pkg/tracing/metadata/extractors"
 	rpbv2 "github.com/inngest/inngest/proto/gen/run/v2"
 	"github.com/oklog/ulid/v2"
 )
@@ -98,6 +101,8 @@ func (tr *traceReader) GetRunTrace(ctx context.Context, keys dataloader.Keys) []
 				return
 			}
 
+			tr.foldChildRunAIUsage(ctx, rootSpan)
+
 			gqlRoot, err := tr.convertRunSpanToGQL(ctx, rootSpan)
 			if err != nil {
 				res.Error = fmt.Errorf("error converting run root to GQL: %w", err)
@@ -112,6 +117,122 @@ func (tr *traceReader) GetRunTrace(ctx context.Context, keys dataloader.Keys) []
 	wg.Wait()
 
 	return results
+}
+
+// foldChildRunAIUsage folds AI usage from step.invoke child runs into the
+// root span's inngest.ai.summary metadata entry. The child fetch lives here
+// in the loader layer so that GetSpansByRunID stays a pure in-tree
+// computation (it also serves the rerun path). Only direct children are
+// fetched; deeper descendants and unreachable or still-running children
+// leave the summary marked partial. Any failure degrades gracefully to the
+// in-tree summary, which is already partial whenever invoke steps exist.
+func (tr *traceReader) foldChildRunAIUsage(ctx context.Context, root *cqrs.OtelSpan) {
+	foldChildRunAIUsage(ctx, root, tr.reader.GetRunsAIUsage)
+}
+
+func foldChildRunAIUsage(
+	ctx context.Context,
+	root *cqrs.OtelSpan,
+	getUsage func(context.Context, []ulid.ULID) (map[ulid.ULID]extractors.AISummaryMetadata, error),
+) {
+	if root == nil {
+		return
+	}
+
+	childIDs, pending := collectInvokedRunIDs(root, map[ulid.ULID]struct{}{})
+	if len(childIDs) == 0 {
+		return
+	}
+
+	summaryIdx := slices.IndexFunc(root.Metadata, func(m *cqrs.SpanMetadata) bool {
+		return m.Kind == extractors.KindInngestAISummary
+	})
+	if summaryIdx < 0 {
+		// The in-tree walk attaches a (possibly zero-valued) summary whenever
+		// invoke steps exist, so there should always be one to fold into.
+		return
+	}
+
+	existing, err := extractors.AISummaryFromValues(root.Metadata[summaryIdx].Values)
+	if err != nil {
+		logger.StdlibLogger(ctx).Warn(
+			"error parsing in-tree AI summary metadata",
+			"run_id", root.RunID.String(),
+			"error", err,
+		)
+		return
+	}
+
+	usage, err := getUsage(ctx, childIDs)
+	if err != nil {
+		logger.StdlibLogger(ctx).Warn(
+			"error loading child run AI usage",
+			"run_id", root.RunID.String(),
+			"error", err,
+		)
+		return
+	}
+
+	builder := extractors.NewAISummaryBuilder()
+	// The in-tree summary was partial only because these children hadn't been
+	// folded in yet; partiality is re-derived from the children below.
+	existing.Partial = false
+	builder.AddSummary(existing)
+
+	if pending {
+		builder.MarkPartial()
+	}
+	for _, id := range childIDs {
+		childUsage, ok := usage[id]
+		if !ok {
+			// Unreachable child run.
+			builder.MarkPartial()
+			continue
+		}
+		builder.AddSummary(childUsage)
+	}
+
+	folded := builder.Summary()
+	if builder.Empty() && !folded.Partial {
+		// No usage anywhere and nothing outstanding: drop the placeholder the
+		// in-tree walk attached for the invoke steps.
+		root.Metadata = slices.Delete(root.Metadata, summaryIdx, summaryIdx+1)
+		return
+	}
+
+	values, err := folded.Serialize()
+	if err != nil {
+		logger.StdlibLogger(ctx).Warn(
+			"error serializing folded AI summary metadata",
+			"run_id", root.RunID.String(),
+			"error", err,
+		)
+		return
+	}
+	root.Metadata[summaryIdx].Values = values
+}
+
+// collectInvokedRunIDs walks the span tree collecting the distinct run IDs of
+// runs invoked via step.invoke. pending reports invoke steps whose child run
+// ID hasn't been stamped yet.
+func collectInvokedRunIDs(span *cqrs.OtelSpan, seen map[ulid.ULID]struct{}) (ids []ulid.ULID, pending bool) {
+	if span.Attributes != nil && span.Attributes.StepInvokeRunID != nil {
+		id := *span.Attributes.StepInvokeRunID
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	} else if span.IsInvokeStep() {
+		pending = true
+	}
+
+	for _, child := range span.Children {
+		childIDs, childPending := collectInvokedRunIDs(child, seen)
+		ids = append(ids, childIDs...)
+		pending = pending || childPending
+	}
+
+	return ids, pending
 }
 
 func (tr *traceReader) opcodeToGQL(op *enums.Opcode) *models.StepOp {

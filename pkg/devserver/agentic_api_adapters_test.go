@@ -13,6 +13,7 @@ import (
 	"github.com/inngest/inngest/pkg/cqrs"
 	"github.com/inngest/inngest/pkg/enums"
 	"github.com/inngest/inngest/pkg/tracing/meta"
+	"github.com/inngest/inngest/pkg/tracing/metadata/extractors"
 	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -582,6 +583,10 @@ func (f *fakeTraceReader) GetSpanStack(ctx context.Context, id cqrs.SpanIdentifi
 func (f *fakeTraceReader) GetSpansByRunID(ctx context.Context, runID ulid.ULID) (*cqrs.OtelSpan, error) {
 	f.runID = runID
 	return f.root, nil
+}
+
+func (f *fakeTraceReader) GetRunsAIUsage(ctx context.Context, runIDs []ulid.ULID) (map[ulid.ULID]extractors.AISummaryMetadata, error) {
+	return nil, nil
 }
 
 func (f *fakeTraceReader) GetSpansByDebugRunID(ctx context.Context, debugRunID ulid.ULID) ([]*cqrs.OtelSpan, error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/inngest/inngest/pkg/enums"
 	"github.com/inngest/inngest/pkg/tracing/meta"
 	"github.com/inngest/inngest/pkg/tracing/metadata"
+	"github.com/inngest/inngest/pkg/tracing/metadata/extractors"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -126,6 +127,18 @@ func (s *OtelSpan) GetParentSpanID() *string {
 	}
 
 	return s.ParentSpanID
+}
+
+// IsInvokeStep reports whether this span is a step.invoke step, including
+// ones whose child run ID hasn't been stamped yet.
+func (s *OtelSpan) IsInvokeStep() bool {
+	if s.Attributes == nil {
+		return false
+	}
+	if s.Attributes.StepInvokeRunID != nil {
+		return true
+	}
+	return s.Attributes.StepOp != nil && *s.Attributes.StepOp == enums.OpcodeInvokeFunction
 }
 
 func (s *OtelSpan) GetIsRoot() bool {
@@ -432,6 +445,11 @@ type TraceReader interface {
 	GetSpanStack(ctx context.Context, id SpanIdentifier) ([]string, error)
 	// GetSpansByRunID retrieves all spans related to the specified run
 	GetSpansByRunID(ctx context.Context, runID ulid.ULID) (*OtelSpan, error)
+	// GetRunsAIUsage returns each run's aggregated AI usage, summed at read
+	// time from its inngest.ai metadata spans. Used by the GraphQL loader
+	// layer to fold step.invoke child run usage into a parent run's
+	// inngest.ai.summary; runs with no spans are omitted from the result.
+	GetRunsAIUsage(ctx context.Context, runIDs []ulid.ULID) (map[ulid.ULID]extractors.AISummaryMetadata, error)
 	// GetSpansByDebugRunID retrieves all spans related to the specified debug run
 	GetSpansByDebugRunID(ctx context.Context, debugRunID ulid.ULID) ([]*OtelSpan, error)
 	// GetSpansByDebugSessionID retrieves all spans related to the specified debug session

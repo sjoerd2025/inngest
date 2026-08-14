@@ -34,6 +34,7 @@ import (
 	"github.com/inngest/inngest/pkg/run"
 	"github.com/inngest/inngest/pkg/tracing/meta"
 	"github.com/inngest/inngest/pkg/tracing/metadata"
+	"github.com/inngest/inngest/pkg/tracing/metadata/extractors"
 	"github.com/inngest/inngest/pkg/util"
 	connpb "github.com/inngest/inngest/proto/gen/connect/v1"
 	"github.com/oklog/ulid/v2"
@@ -492,12 +493,18 @@ fragmentLoop:
 		}
 	}
 
-	if info != nil && isMetadata && parentSpanIDPtr != nil {
-		metadata, err := rollupSpanMetadataFromFragments(ctx, fragments, parsedEndTime)
-		if err != nil {
+	if isMetadata && (info == nil || parentSpanIDPtr != nil) {
+		md, err := rollupSpanMetadataFromFragments(ctx, fragments, parsedEndTime)
+		switch {
+		case err != nil:
 			logger.StdlibLogger(ctx).Error("error rolling up metadata span", "error", err)
-		} else {
-			info.metadataByParent[*parentSpanIDPtr] = append(info.metadataByParent[*parentSpanIDPtr], metadata)
+		case info != nil:
+			info.metadataByParent[*parentSpanIDPtr] = append(info.metadataByParent[*parentSpanIDPtr], md)
+		default:
+			// Standalone fetch with no tree assembly (e.g. GetSpansByRunIDsAndName
+			// with the metadata span name): attach the rolled-up entry to the
+			// metadata span itself so callers can read it directly.
+			newSpan.Metadata = append(newSpan.Metadata, md)
 		}
 	}
 
@@ -813,6 +820,7 @@ func mapRootSpansFromRows[T normalizedSpan](ctx context.Context, spans []T) (*cq
 
 	sorter(root)
 	computeAndAttachUsageMetadata(root)
+	computeAndAttachAISummaryMetadata(ctx, root)
 
 	return root, nil
 }
@@ -935,6 +943,85 @@ func walkMetadataSize(span *cqrs.OtelSpan, total *int) {
 	for _, child := range span.Children {
 		walkMetadataSize(child, total)
 	}
+}
+
+// computeAndAttachAISummaryMetadata walks the span tree, sums all counted
+// inngest.ai metadata entries, and attaches a synthetic run-scoped
+// "inngest.ai.summary" entry to the root span. Like inngest.usage, the
+// summary is recomputed on every read and never persisted; any stored
+// entries of that kind are stripped first so the computed value is always
+// authoritative and can never double-count itself.
+//
+// Usage from invoked child runs is not folded in here — that happens in the
+// GraphQL loader layer, keeping this a pure in-tree computation — so the
+// summary is marked partial whenever the tree contains invoke steps.
+func computeAndAttachAISummaryMetadata(ctx context.Context, root *cqrs.OtelSpan) {
+	removeStoredAISummary(root)
+
+	builder := extractors.NewAISummaryBuilder()
+	hasInvokes := walkAIUsage(ctx, root, builder)
+	if builder.Empty() && !hasInvokes {
+		return
+	}
+	if hasInvokes {
+		builder.MarkPartial()
+	}
+
+	values, err := builder.Summary().Serialize()
+	if err != nil {
+		logger.StdlibLogger(ctx).Error("error serializing AI summary metadata", "error", err)
+		return
+	}
+
+	ts := root.EndTime
+	if ts.IsZero() {
+		ts = root.StartTime
+	}
+
+	root.Metadata = append(root.Metadata, &cqrs.SpanMetadata{
+		Scope:     enums.MetadataScopeRun,
+		Kind:      extractors.KindInngestAISummary,
+		Values:    values,
+		UpdatedAt: ts,
+	})
+}
+
+func removeStoredAISummary(span *cqrs.OtelSpan) {
+	span.Metadata = slices.DeleteFunc(span.Metadata, func(m *cqrs.SpanMetadata) bool {
+		return m.Kind == extractors.KindInngestAISummary
+	})
+	for _, child := range span.Children {
+		removeStoredAISummary(child)
+	}
+}
+
+// walkAIUsage folds every counted inngest.ai metadata entry in the tree into
+// the builder and reports whether the tree contains invoke steps — including
+// ones whose child run ID hasn't been stamped yet.
+func walkAIUsage(ctx context.Context, span *cqrs.OtelSpan, builder *extractors.AISummaryBuilder) (hasInvokes bool) {
+	for _, md := range span.Metadata {
+		if md.Kind != extractors.KindInngestAI || !extractors.AIUsageScopeCounted(md.Scope) {
+			continue
+		}
+		if err := builder.AddCall(md.Values); err != nil {
+			logger.StdlibLogger(ctx).Warn(
+				"skipping malformed inngest.ai metadata entry",
+				"run_id", span.RunID.String(),
+				"span_id", span.SpanID,
+				"error", err,
+			)
+		}
+	}
+
+	hasInvokes = span.IsInvokeStep()
+
+	for _, child := range span.Children {
+		if walkAIUsage(ctx, child, builder) {
+			hasInvokes = true
+		}
+	}
+
+	return hasInvokes
 }
 
 // extendedTraceKey is the map key used when indexing and reparenting orphaned
