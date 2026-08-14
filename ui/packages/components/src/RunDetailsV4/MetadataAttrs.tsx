@@ -3,14 +3,19 @@ import { useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
 import { ElementWrapper, TextElement, TimeElement } from '../DetailsCard/Element';
 import type { SpanMetadata, SpanMetadataKind } from './types';
 
+// Keyed by full kind, not by the first suffix segment: `inngest.ai` and
+// `inngest.ai.summary` (and `inngest.http` / `inngest.http.timing`) are
+// distinct kinds that would otherwise collide onto one label.
 const inngestKindLabels: Record<string, string> = {
-  ai: 'AI Metadata',
-  experiment: 'Experiment',
-  http: 'HTTP Metadata',
-  response_headers: 'Response Headers',
-  score: 'Scores',
-  usage: 'Run Usage',
-  warnings: 'Warnings',
+  'inngest.ai': 'AI Metadata',
+  'inngest.ai.summary': 'AI Summary',
+  'inngest.experiment': 'Experiment',
+  'inngest.http': 'HTTP Metadata',
+  'inngest.http.timing': 'HTTP Timing',
+  'inngest.response_headers': 'Response Headers',
+  'inngest.score': 'Scores',
+  'inngest.usage': 'Run Usage',
+  'inngest.warnings': 'Warnings',
 };
 
 const formatBytes = (bytes: number): string => {
@@ -29,7 +34,7 @@ const getKindLabel = (kind: SpanMetadataKind): string => {
   }
 
   if (namespace === 'inngest') {
-    return inngestKindLabels[kindName] || `Metadata (${kindName})`;
+    return inngestKindLabels[kind] || `Metadata (${kindName})`;
   }
 
   if (kindName === 'default') {

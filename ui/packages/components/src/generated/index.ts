@@ -9,6 +9,7 @@ export type SpanMetadataKindUserland = `userland.${string}`;
 export type SpanMetadataKindInngestScore = typeof KindInngestScore;
 export type SpanMetadataKind =
   | typeof KindInngestAI
+  | typeof KindInngestAISummary
   | typeof KindInngestHTTP
   | typeof KindInngestHTTPTiming
   | typeof KindInngestResponseHeaders
@@ -76,6 +77,33 @@ export interface AIMetadata {
   frequency_penalty?: number /* float64 */;
   presence_penalty?: number /* float64 */;
   seed?: number /* int64 */;
+}
+/**
+ * From ai_summary.go
+ */
+/**
+ * KindInngestAISummary is the run-scoped rollup of all AI usage within a
+ * run, including usage folded in from invoked child runs. It is
+ * synthesized every time a run's span tree is read and is never
+ * persisted, so it is always authoritative and can never double-count
+ * itself. It must never be added to the allowedInngestKinds allowlist.
+ */
+export const KindInngestAISummary = 'inngest.ai.summary';
+/**
+ * From ai_summary.go
+ */
+export interface AISummaryMetadata {
+  input_tokens: number /* int64 */;
+  output_tokens: number /* int64 */;
+  total_tokens: number /* int64 */;
+  estimated_cost?: number /* float64 */;
+  models?: string[];
+  call_count: number /* int64 */;
+  /**
+   * Partial marks the summary as known-incomplete: an invoked child run is
+   * still running, unreachable, or beyond the depth-1 aggregation.
+   */
+  partial: boolean;
 }
 /**
  * From experiment.go

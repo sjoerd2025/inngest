@@ -58,6 +58,29 @@ type AIMetadata struct {
 	Seed             *int64   `json:"seed,omitempty"`
 }
 
+// From ai_summary.go
+const (
+	// KindInngestAISummary is the run-scoped rollup of all AI usage within a
+	// run, including usage folded in from invoked child runs. It is
+	// synthesized every time a run's span tree is read and is never
+	// persisted, so it is always authoritative and can never double-count
+	// itself. It must never be added to the allowedInngestKinds allowlist.
+	KindInngestAISummary = "inngest.ai.summary"
+)
+
+// From ai_summary.go
+type AISummaryMetadata struct {
+	InputTokens   int64    `json:"input_tokens"`
+	OutputTokens  int64    `json:"output_tokens"`
+	TotalTokens   int64    `json:"total_tokens"`
+	EstimatedCost *float64 `json:"estimated_cost,omitempty"`
+	Models        []string `json:"models,omitempty"`
+	CallCount     int64    `json:"call_count"`
+	// Partial marks the summary as known-incomplete: an invoked child run is
+	// still running, unreachable, or beyond the depth-1 aggregation.
+	Partial bool `json:"partial"`
+}
+
 // From experiment.go
 const (
 	KindInngestExperiment = "inngest.experiment"
